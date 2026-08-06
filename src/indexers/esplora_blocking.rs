@@ -49,20 +49,17 @@ impl ResolveWitness for EsploraClient {
     }
 
     fn resolve_witness(&self, txid: Txid) -> Result<WitnessStatus, WitnessResolverError> {
-        let Some(tx) = self
+        let Some(tx_info) = self
             .inner
-            .get_tx(&txid)
+            .get_tx_info(&txid)
             .map_err(|e| WitnessResolverError::ResolverIssue(Some(txid), e.to_string()))?
         else {
             return Ok(WitnessStatus::Unresolved);
         };
-        let status = self
-            .inner
-            .get_tx_status(&txid)
-            .map_err(|e| WitnessResolverError::ResolverIssue(Some(txid), e.to_string()))?;
-        let ord = match status
+        let ord = match tx_info
+            .status
             .block_height
-            .and_then(|h| status.block_time.map(|t| (h, t)))
+            .and_then(|h| tx_info.status.block_time.map(|t| (h, t)))
         {
             Some((h, t)) => {
                 let height = NonZeroU32::new(h).ok_or(WitnessResolverError::InvalidResolverData)?;
@@ -73,6 +70,6 @@ impl ResolveWitness for EsploraClient {
             }
             None => WitnessOrd::Tentative,
         };
-        Ok(WitnessStatus::Resolved(tx, ord))
+        Ok(WitnessStatus::Resolved(tx_info.to_tx(), ord))
     }
 }
