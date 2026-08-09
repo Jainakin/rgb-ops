@@ -65,13 +65,89 @@ impl ResolveWitness for MemPoolClient {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod test {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread::{self, JoinHandle};
+
     use super::*;
 
+    const EXTERNAL_TEST_TIMEOUT_SECS: u64 = 30;
+
+    fn external_builder(url: &str) -> Builder {
+        Builder::new(url).timeout(EXTERNAL_TEST_TIMEOUT_SECS)
+    }
+
+    fn mock_builder(content_type: &'static str, body: Vec<u8>) -> (Builder, JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock Esplora server");
+        let address = listener.local_addr().expect("read mock server address");
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept mock Esplora request");
+            let mut request = [0_u8; 4096];
+            let bytes_read = stream
+                .read(&mut request)
+                .expect("read mock Esplora request");
+            let request = String::from_utf8_lossy(&request[..bytes_read]).into_owned();
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: \
+                 {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .expect("write mock Esplora response headers");
+            stream
+                .write_all(&body)
+                .expect("write mock Esplora response body");
+            request
+        });
+        let url = format!("http://{address}");
+        (Builder::new(&url).timeout(5), handle)
+    }
+
     #[test]
+    fn mempool_client_parses_esplora_status_response() {
+        let body = br#"{"confirmed":true,"block_height":1,"block_hash":"0000000000000000000000000000000000000000000000000000000000000000","block_time":1231006505}"#.to_vec();
+        let (builder, server) = mock_builder("application/json", body);
+        let client = super::MemPoolClient::new(builder);
+        let txid = "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b"
+            .parse()
+            .unwrap();
+
+        let status = client.inner.inner.get_tx_status(&txid).unwrap();
+
+        assert_eq!(status.block_height, Some(1));
+        assert_eq!(status.block_time, Some(1231006505));
+        let request = server.join().expect("join mock Esplora server");
+        assert!(request.starts_with(&format!("GET /tx/{txid}/status HTTP/1.1")));
+    }
+
+    #[test]
+    fn mempool_client_parses_esplora_raw_transaction_response() {
+        let genesis =
+            rgb::bitcoin::blockdata::constants::genesis_block(rgb::bitcoin::Network::Bitcoin);
+        let transaction = genesis.txdata[0].clone();
+        let txid = transaction.compute_txid();
+        let body = rgb::bitcoin::consensus::serialize(&transaction);
+        let (builder, server) = mock_builder("application/octet-stream", body);
+        let client = super::MemPoolClient::new(builder);
+
+        let resolved = client
+            .inner
+            .inner
+            .get_tx(&txid)
+            .expect("parse mock transaction")
+            .expect("mock transaction exists");
+
+        assert_eq!(resolved, transaction);
+        let request = server.join().expect("join mock Esplora server");
+        assert!(request.starts_with(&format!("GET /tx/{txid}/raw HTTP/1.1")));
+    }
+
+    #[test]
+    #[ignore = "requires live public mempool.space availability"]
     fn test_mempool_client_mainnet_tx() {
-        let builder = Builder::new("https://mempool.space/api");
+        let builder = external_builder("https://mempool.space/api");
         let client = super::MemPoolClient::new(builder);
         let txid = "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b"
             .parse()
@@ -82,8 +158,9 @@ mod test {
     }
 
     #[test]
+    #[ignore = "requires live public mempool.space availability"]
     fn test_mempool_client_testnet_tx() {
-        let builder = Builder::new("https://mempool.space/testnet/api");
+        let builder = external_builder("https://mempool.space/testnet/api");
         let client = super::MemPoolClient::new(builder);
 
         let txid = "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b"
@@ -95,8 +172,9 @@ mod test {
     }
 
     #[test]
+    #[ignore = "requires live public mempool.space availability"]
     fn test_mempool_client_testnet4_tx() {
-        let builder = Builder::new("https://mempool.space/testnet4/api");
+        let builder = external_builder("https://mempool.space/testnet4/api");
         let client = super::MemPoolClient::new(builder);
         let txid = "7aa0a7ae1e223414cb807e40cd57e667b718e42aaf9306db9102fe28912b7b4e"
             .parse()
@@ -107,8 +185,9 @@ mod test {
     }
 
     #[test]
+    #[ignore = "requires live public mempool.space availability"]
     fn test_mempool_client_testnet4_tx_detail() {
-        let builder = Builder::new("https://mempool.space/testnet4/api");
+        let builder = external_builder("https://mempool.space/testnet4/api");
         let client = super::MemPoolClient::new(builder);
         let txid = "7aa0a7ae1e223414cb807e40cd57e667b718e42aaf9306db9102fe28912b7b4e"
             .parse()
